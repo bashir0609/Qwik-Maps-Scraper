@@ -44,7 +44,7 @@ npm install
 npm run dev
 ```
 
-Opens at `http://localhost:5173`. Development mode runs slower than production — scraping times will be longer.
+Opens at `http://localhost:5000`. Development mode runs slower than production — scraping times will be longer.
 
 ### Production Build
 
@@ -144,14 +144,16 @@ src/
 │   └── places-api/            # Google Places API alternative
 ├── components/
 │   ├── header/header.tsx
+│   ├── navbar/navbar.tsx
 │   ├── search-bar/search-bar.tsx
 │   ├── results-table/results-table.tsx
-│   └── place-card/place-card.tsx
+│   ├── place-card/place-card.tsx
+│   └── router-head/router-head.tsx
 ├── data/
 │   ├── locations.ts            # 4 countries, regions, towns
 │   └── categories.ts           # 26 categories with keywords
 └── utils/
-    ├── scrape.ts               # Scraping engine (~1073 lines)
+    ├── scrape.ts               # Scraping engine (~1937 lines)
     └── places-api.ts           # Google Places API integration
 server.ts                       # Production entry point
 ```
@@ -166,6 +168,7 @@ server.ts                       # Production entry point
 | `PUPPETEER_EXECUTABLE_PATH` | System Chromium path | `/usr/bin/chromium` |
 | `PORT` | Server port | `8080` |
 | `HOST` | Server host | `0.0.0.0` |
+| `GOOGLE_API_KEY` | Google Places API key (optional) | — |
 
 ## License
 
