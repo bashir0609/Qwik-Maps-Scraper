@@ -1,0 +1,13 @@
+node_modules/
+dist/
+server/
+.turbo/
+.vite/
+tmp/
+*.tsbuildinfo
+.env
+.DS_Store
+.config/
+.agents/
+attached_assets/
+src/utils/test.txt
