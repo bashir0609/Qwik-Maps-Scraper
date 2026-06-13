@@ -42,7 +42,7 @@ export default component$(() => {
         return;
       }
 
-      if (current.places && Array.isArray(current.places)) {
+      if (current.places && current.places.length > 0) {
         const safePlaces = current.places.map((p) => ({
           name: p?.name || "",
           address: p?.address || "",
@@ -74,8 +74,16 @@ export default component$(() => {
           status: current.status || "running",
           progress: current.progress || "",
         };
-      } else {
-        results.value = { ...current, places: [] };
+      } else if (current.places) {
+        // No places in this poll — keep existing results, just update status/progress
+        if (results.value) {
+          results.value = {
+            ...results.value,
+            status: current.status || results.value.status,
+            progress: current.progress || results.value.progress,
+            error: current.error || results.value.error,
+          };
+        }
       }
       progressMsg.value =
         current.progress || `Found ${current.places?.length || 0} leads...`;

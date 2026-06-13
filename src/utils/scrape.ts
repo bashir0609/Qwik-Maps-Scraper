@@ -1,7 +1,6 @@
 import { server$ } from "@builder.io/qwik-city";
 import puppeteer, { type Browser, type Page } from "puppeteer";
 import type { PlaceResult, ScrapeResult } from "../types";
-import { rmSync } from "fs";
 
 const BROWSERS_COUNT = 3;
 const browsers: Browser[] = [];
@@ -127,6 +126,7 @@ async function cleanupBrowsers(): Promise<void> {
   browserRoundRobin = 0;
   for (const dir of browserTempDirs) {
     try {
+      const { rmSync } = await import("fs");
       rmSync(dir, { recursive: true, force: true });
     } catch {
       /* ignore */
@@ -225,6 +225,7 @@ async function closeAllBrowsers(): Promise<void> {
   browserRoundRobin = 0;
   for (const dir of browserTempDirs) {
     try {
+      const { rmSync } = await import("fs");
       rmSync(dir, { recursive: true, force: true });
     } catch {
       /* ignore */
