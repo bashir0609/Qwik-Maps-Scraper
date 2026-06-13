@@ -35,8 +35,18 @@ Extract business data from Google Maps — names, addresses, ratings, reviews, p
 ### Install
 
 ```bash
+# Linux/macOS/Docker
+npm install
+
+# Windows (skip Chromium download — use system Chrome instead)
+set PUPPETEER_SKIP_DOWNLOAD=true
 npm install
 ```
+
+> **Windows users:** Set `PUPPETEER_EXECUTABLE_PATH` to your Chrome path before running:
+> ```bash
+> set PUPPETEER_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
+> ```
 
 ### Development
 
@@ -44,7 +54,7 @@ npm install
 npm run dev
 ```
 
-Opens at `http://localhost:5000`. Development mode runs slower than production — scraping times will be longer.
+Opens at `http://localhost:5173`. Development mode runs slower than production — scraping times will be longer.
 
 ### Production Build
 
