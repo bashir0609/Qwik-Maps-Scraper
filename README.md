@@ -116,7 +116,7 @@ Clears `dist/`, `server/`, and build cache.
 | Keyword sequencing | 1 at a time, 1000ms gap |
 | Town batches | 3 concurrent, 2000ms between batches |
 | Detail enrichment | 1 at a time, 500ms gap |
-| Email extraction | 1 at a time, 500ms gap |
+| Email extraction | fetch + regex, 10s timeout, 1 retry |
 | User agent | Chrome 126 on Windows 10 |
 | Images | Google images load, non-Google blocked |
 

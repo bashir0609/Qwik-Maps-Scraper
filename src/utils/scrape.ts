@@ -13,7 +13,6 @@ const RATE_DELAY = {
   betweenKeywords: 1000,
   betweenTowns: 2000,
   detailPage: 500,
-  emailPage: 500,
 };
 
 interface ScrapeSession {
@@ -762,7 +761,7 @@ async function enrichPlaceDetail(
     const city = extractCityFromAddress(detail.address);
     let email = "";
     if (website) {
-      email = await extractEmails(browser, website);
+      email = await extractEmails(website);
     }
     return {
       name: detail.name,
@@ -845,10 +844,7 @@ async function handleConsent(browserPage: Page): Promise<void> {
   }
 }
 
-async function extractEmails(
-  browser: Browser,
-  websiteUrl: string,
-): Promise<string> {
+async function extractEmails(websiteUrl: string): Promise<string> {
   if (!websiteUrl) return "";
   const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
   const SKIP_LOCALS = new Set([
@@ -896,106 +892,75 @@ async function extractEmails(
       .replace(/\sdot\s/gi, ".");
   };
 
-  const collectEmailsFromPage = async (
-    url: string,
-    attemptLabel: string = "homepage",
-  ): Promise<Set<string>> => {
+  const isJunkEmail = (e: string): boolean => {
+    const [local, domain] = e.split("@");
+    if (!local || !domain) return true;
+    if (SKIP_LOCALS.has(local)) return true;
+    if (SKIP_DOMAINS.has(domain)) return true;
+    if ([...SKIP_DOMAINS].some((d) => domain.endsWith("." + d))) return true;
+    return false;
+  };
+
+  const fetchAndExtract = async (url: string): Promise<Set<string>> => {
     const found = new Set<string>();
-    const page = await browser.newPage();
     try {
-      await new Promise((resolve) => setTimeout(resolve, RATE_DELAY.emailPage));
-      await setupPage(page, false);
-      const navResult = await page
-        .goto(url, { waitUntil: "networkidle2", timeout: 15000 })
-        .catch(() => null);
-      if (!navResult) {
-        console.error(`[extractEmails] Navigation failed for ${url}`);
-        return found;
-      }
-      await new Promise((r) => setTimeout(r, 2000));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; MapsScraper/2.0)" },
+      });
+      clearTimeout(timeout);
+      if (!response.ok) return found;
+      const html = await response.text();
 
-      const emails = await page.evaluate((regexSrc: string) => {
-        const results = new Set<string>();
-        const regex = new RegExp(regexSrc, "g");
-        const bodyText = document.body?.innerText || "";
-        let match: RegExpExecArray | null;
-        while ((match = regex.exec(bodyText)) !== null) {
-          results.add(match[0].toLowerCase());
-        }
-        const anchors = document.querySelectorAll('a[href^="mailto:"]');
-        anchors.forEach((a) => {
-          const addr = (a as HTMLAnchorElement).href
-            .replace("mailto:", "")
-            .split("?")[0]
-            .trim()
-            .toLowerCase();
-          if (addr && addr.includes("@")) results.add(addr);
-        });
-        return [...results];
-      }, EMAIL_REGEX.source);
-
-      const isJunkEmail = (e: string): boolean => {
-        const [local, domain] = e.split("@");
-        if (!local || !domain) return true;
-        if (SKIP_LOCALS.has(local)) return true;
-        if (SKIP_DOMAINS.has(domain)) return true;
-        if ([...SKIP_DOMAINS].some((d) => domain.endsWith("." + d)))
-          return true;
-        return false;
-      };
-
-      for (const e of emails) {
-        const cleaned = deobfuscate(e);
-        if (
-          cleaned.includes("@") &&
-          cleaned.includes(".") &&
-          !isJunkEmail(cleaned)
-        ) {
-          found.add(cleaned);
-        }
-      }
-
-      if (found.size === 0) {
-        const rawHtml = await page.content();
-        const matches = rawHtml.match(EMAIL_REGEX);
-        if (matches) {
-          for (const m of matches) {
-            const cleaned = deobfuscate(m.toLowerCase());
-            if (
-              cleaned.includes("@") &&
-              cleaned.includes(".") &&
-              !isJunkEmail(cleaned)
-            ) {
-              found.add(cleaned);
-            }
+      // Regex on full HTML
+      const matches = html.match(EMAIL_REGEX);
+      if (matches) {
+        for (const m of matches) {
+          const cleaned = deobfuscate(m.toLowerCase());
+          if (
+            cleaned.includes("@") &&
+            cleaned.includes(".") &&
+            !isJunkEmail(cleaned)
+          ) {
+            found.add(cleaned);
           }
+        }
+      }
+
+      // Also extract mailto: links
+      const mailtoRegex = /mailto:([^\s"'<>]+)/gi;
+      let mailtoMatch: RegExpExecArray | null;
+      while ((mailtoMatch = mailtoRegex.exec(html)) !== null) {
+        const addr = decodeURIComponent(
+          mailtoMatch[1].split("?")[0].trim().toLowerCase(),
+        );
+        if (addr.includes("@") && !isJunkEmail(addr)) {
+          found.add(addr);
         }
       }
     } catch (err) {
       console.error(
-        `[extractEmails] Error on ${attemptLabel}:`,
+        `[extractEmails] fetch failed for ${url}:`,
         err instanceof Error ? err.message : String(err),
       );
-    } finally {
-      await page.close().catch(() => {});
     }
     return found;
   };
 
   try {
     const allEmails = new Set<string>();
-    let homepageEmails = await collectEmailsFromPage(websiteUrl, "homepage");
-    for (const e of homepageEmails) allEmails.add(e);
 
+    // First attempt
+    let found = await fetchAndExtract(websiteUrl);
+    for (const e of found) allEmails.add(e);
+
+    // Retry once if nothing found
     if (allEmails.size === 0) {
-      console.error(
-        `[extractEmails] No emails found on homepage for ${websiteUrl}, retrying...`,
-      );
-      homepageEmails = await collectEmailsFromPage(
-        websiteUrl,
-        "homepage-retry",
-      );
-      for (const e of homepageEmails) allEmails.add(e);
+      await new Promise((r) => setTimeout(r, 500));
+      found = await fetchAndExtract(websiteUrl);
+      for (const e of found) allEmails.add(e);
     }
 
     if (allEmails.size === 0) return "";
@@ -1030,14 +995,12 @@ async function extractEmails(
         "contact",
         "book",
         "reserv",
-        "book",
         "appoint",
         "inquir",
         "support",
         "sales",
         "admin",
         "office",
-        "hello",
         "hi",
       ];
       const aPrio = priorityPrefixes.some((p) => a.split("@")[0].startsWith(p))
@@ -1798,12 +1761,8 @@ export const destroyScrape = server$(async function (
 export const extractEmailForWebsite = server$(async function (
   websiteUrl: string,
 ): Promise<string> {
-  let browser: Browser | null = null;
   try {
-    await ensureBrowsers(1);
-    browser = browsers[0];
-    if (!browser) browser = await launchBrowser();
-    return await extractEmails(browser, websiteUrl);
+    return await extractEmails(websiteUrl);
   } catch {
     return "";
   }
