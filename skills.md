@@ -1,6 +1,4 @@
-# Google Maps Scraper — Full Specification for Recreation
-Project dir:
-"C:\Users\Islah4\Desktop\Apps\Qwik"
+# Google Maps Scraper — Full Specification
 
 ## 1. Purpose
 
@@ -12,8 +10,9 @@ A web app that scrapes Google Maps for business data (name, address, rating, rev
 |-------|-----------|
 | Framework | Qwik v1.20 + Qwik City |
 | Runtime | Node.js >= 22 |
-| Scraping | Puppeteer v25 (headless Chromium) |
-| CSS | Custom CSS (dark theme, ~1150 lines in `src/global.css`) |
+| Scraping | Puppeteer v25 (headless Chromium, 3-browser pool) |
+| Email extraction | `fetch` + regex (no browser needed) |
+| CSS | Custom CSS dark theme (~1400 lines in `src/global.css`) |
 | Bundler | Vite v7 |
 | Deployment | Docker (Node 22-slim + Chromium), Railway/Render |
 | Linting | ESLint + Qwik plugin |
@@ -22,490 +21,285 @@ A web app that scrapes Google Maps for business data (name, address, rating, rev
 
 ```
 src/
-├── types.ts                    # PlaceResult, ScrapeResult interfaces
-├── entry.ssr.tsx               # SSR entry point
-├── root.tsx                    # Root layout
-├── global.css                  # All styles (~1150 lines)
+├── types.ts                     # PlaceResult, ScrapeResult interfaces
+├── entry.ssr.tsx                # SSR entry point
+├── root.tsx                     # Root layout + Navbar + RouterOutlet
+├── global.css                   # All styles (~1400 lines, dark theme)
 ├── routes/
-│   └── index.tsx              # Main page (all state, handlers, layout)
+│   ├── index.tsx               # Main scraper page
+│   ├── details/index.tsx       # Single URL extractor
+│   └── places-api/index.tsx    # Google Places API alternative
 ├── components/
-│   ├── header/header.tsx       # Page header
-│   ├── router-head/            # HTML head meta
-│   ├── search-bar/search-bar.tsx # Search form with filters
-│   ├── results-table/results-table.tsx # Table view
-│   └── place-card/place-card.tsx # Card view
+│   ├── header/header.tsx        # Hero header
+│   ├── navbar/navbar.tsx        # Top nav (Scraper | Places API | URL Extractor)
+│   ├── router-head/router-head.tsx
+│   ├── search-bar/search-bar.tsx # Country→Region→Town dropdowns, multi-category popover
+│   ├── results-table/results-table.tsx # Table view with pagination, copy, fetch
+│   └── place-card/place-card.tsx # Card view with copy, fetch, email buttons
 ├── data/
-│   ├── locations.ts            # 4 countries, regions, towns
-│   └── categories.ts           # 25 business categories with keywords
+│   ├── locations.ts             # 4 countries, 93 regions, hundreds of towns
+│   └── categories.ts            # 25 business categories with keyword variations
 └── utils/
-    └── scrape.ts               # Core scraping engine (~880 lines)
+    ├── scrape.ts                # Core scraping engine (~1937 lines)
+    └── places-api.ts            # Google Places API integration
+server.ts                        # Production entry point
 ```
 
 ## 4. Data Models (`src/types.ts`)
 
 ```ts
 interface PlaceResult {
-  name: string;              // Business name
-  address: string;           // Full address
-  rating: number | null;     // 1-5 rating
-  reviewCount: number | null;// Number of reviews
-  category: string;          // Google Maps category (scraped)
-  phone: string;             // Phone number
-  email: string;             // Email (homepage-only extraction)
-  website: string;           // Business website URL
-  rootDomain: string;        // Extracted root domain
+  name: string;
+  address: string;
+  rating: number | null;
+  reviewCount: number | null;
+  category: string;
+  phone: string;
+  email: string;
+  website: string;
+  rootDomain: string;        // TLD-aware extraction (handles co.uk, com.au, etc.)
   coordinates: { lat: number; lng: number } | null;
-  placeUrl: string;          // Full Google Maps URL
-  city: string;              // City extracted from address
-  filteredCategory: string;  // User-selected category label
-  keyword: string;           // The keyword variation that found this result
+  placeUrl: string;
+  city: string;
+  filteredCategory: string;  // User's selected category
+  keyword: string;           // The variation that found this result
 }
 
 interface ScrapeResult {
   places: PlaceResult[];
-  query: string;             // Search query string
+  query: string;
   totalResults: number;
   error: string | null;
   status: "running" | "done" | "error";
-  progress: string;          // Human-readable progress message
+  progress: string;
 }
 ```
 
 ## 5. Core Scraping Engine (`src/utils/scrape.ts`)
 
 ### 5.1 Architecture
-- **In-memory sessions** (`Map<string, ScrapeSession>`) — 30-minute TTL auto-cleanup
-- **Browser pool** (`Browser[]`) — shared across searches
+
+- **In-memory sessions** (`Map<string, ScrapeSession>`) — 30-min TTL, 60-min orphan cleanup
+- **Browser pool** (`Browser[]`, 3 instances, round-robin with health checks)
+- **Temp dir tracking** — `browserTempDirs[]` cleaned on shutdown
+- **Concurrency cap** — `MAX_CONCURRENT_SESSIONS = 5`
+- **Lightweight polling** — snapshot-based change detection to skip unchanged data
 - **Server$ functions** — Qwik's server-only execution boundary
+- **Graceful shutdown** — SIGINT/exit handlers close browsers + clean temp dirs
 
 ### 5.2 Browser Configuration
 
 ```ts
 puppeteer.launch({
   headless: true,
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,  // Docker: /usr/bin/chromium
   protocolTimeout: 120000,
-  userDataDir: `/tmp/puppeteer-{timestamp}-{random}`,
+  userDataDir: `/tmp/puppeteer-{timestamp}-{random}`,    // Tracked & cleaned on exit
   args: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-accelerated-2d-canvas",
-    "--disable-gpu",
-    "--disable-software-rasterizer",
-    "--window-size=1920,1080",
-    "--lang=en-US,en",
+    "--no-sandbox", "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage", "--disable-gpu",
+    "--window-size=1920,1080", "--lang=en-US,en",
     "--disable-blink-features=AutomationControlled",
-    "--incognito",
-    "--disable-third-party-cookies",
+    "--incognito", "--disable-third-party-cookies",
     "--disk-cache-size=0",
-    "--disable-features=NetworkService,TranslateUI",
-    "--disable-ipc-flooding-protection",
-    "--disable-background-networking",
-    "--disable-sync",
   ],
 });
 ```
 
-### 5.3 Page Setup
+### 5.3 Page Setup (`setupPage`)
 
-```ts
-setupPage(page, blockStyles = true):
-  - Viewport: 1920x1080
-  - User-Agent: Chrome 126 on Windows
-  - Block ads/trackers (google-analytics, googletagmanager, doubleclick, facebook/tr)
-  - When blockStyles: also blocks stylesheet, font, and non-Google image resources (`!url.includes("google") && !url.includes("gstatic")`)
-  - ⚠️ /analytics/i pattern is too broad — blocks legitimate business URLs
-```
+- Viewport: 1920×1080, Chrome 126 UA
+- Blocks: google-analytics, googletagmanager, doubleclick, facebook/tr, intercom, mixpanel, hotjar
+- When `blockStyles=true`: also blocks stylesheets, fonts, non-Google images
+- Request interception: `request.abort()` for blocked, `request.continue()` for allowed
 
-### 5.4 Scraping Functions
+### 5.4 Two-Phase Scraping
 
-#### `scrapeQueryResults()` — PHASE 1: Card-Only Collection (~10s)
-1. Navigate to `https://www.google.com/maps/search/{query}/?hl=en&gl={code}`
-2. Handle consent popup (Accept all button)
+#### Phase 1 — Card Collection (`scrapeQueryResults`)
+
+1. Navigate to `google.com/maps/search/{query}?hl=en&gl={code}`
+2. Handle consent popup (6 selectors, including frame traversal)
 3. Wait for `[role="feed"]` and `.Nv2PK` selectors
-4. Scroll feed via `exhaustivelyScroll()` — `scrollBy(3000px)` + 1500ms wait, stops on `"You've reached the end of the list"` text in body, stale-card-count fallback at 10 rounds
-5. Extract per-card data via `page.evaluate`:
-   - Name: `.qBF1Pd` or `.fontHeadlineSmall`
-   - Rating: `.MW4etd` regex `(\d[.,]\d)`
-   - Reviews: `.UY7F9d` regex `[(]([\d.,]+)[)]`
-   - Place URL: `a[href]` → if absolute (`startsWith("http")`) use as-is, else `https://www.google.com{href}`
-   - Address: from `.W4Efsd` elements, split by `·`, filter:
-     - Pure rating text (`/^\d[.,]\d$/`)
-     - Status text (`/^(Closed|Open|Opens|Closes)/`)
-     - Has digits + longer than 8 chars → address
-     - Clean: camelCase split `([a-z])([A-Z][a-z])` → `$1 $2`, strip Closed/Open, strip `Opens|Closes \d.+`
-   - Category: from same elements, 3-40 chars, no digits
-6. Returns PlaceResult[] with whatever card data was found, NO detail page visits
-7. `perSearchLimit = Math.min(30, Math.max(maxResults, 20))`
+4. Scroll: `feed.scrollBy({ top: 3000, behavior: "smooth" })` + 1500ms wait
+5. Stop condition: "You've reached the end of the list" in body text, or 10 stale rounds
+6. Extract per-card: name (`.qBF1Pd`/`.fontHeadlineSmall`), rating (`.MW4etd`), reviews (`.UY7F9d`), address/category (`.W4Efsd` split by `·`), place URL
+7. `perSearchLimit = Math.min(120, Math.max(maxResults, 20))`
 
-#### `scrapeDetailPage(browser, href, retries=1, timeoutMs=30000)` — Detail Page Extraction
-1. Opens new page, applies stealth patches:
-   - `Object.defineProperty(navigator, "webdriver", { get: () => false })`
-   - `window.chrome = { runtime: {} }`
-   - `navigator.plugins = [1, 2, 3, 4, 5]`
-   - `navigator.languages = ["en-US", "en"]`
-2. Navigate to place URL (`waitUntil: "domcontentloaded"`, configurable timeout)
-3. Handle consent popup on detail page
-4. Wait for h1 (8s timeout)
-5. 1s post-nav wait
-6. Extract via `page.evaluate`:
-   - Name: `h1.DUwDvf` or `h1`
-   - Category: `button[jsaction*="pancat"]`, then badge, then parent siblings, then `.Io6YTe` neighbor
-   - Rating: `aria-label` regex, `.MW4etd` text
-   - Reviews: `aria-label` regex, `.UY7F9d` text
-   - Address: `.Io6YTe` elements, `aria-label` patterns, `data-tooltip` attributes
-   - Phone: `a[href^="tel:"]`, `.Io6YTe`, `data-tooltip`, `aria-label`
-   - Website: `a[href]` with website aria-label or domain text, excluding third-party hosts (opentable, yelp, tripadvisor, etc.)
-   - Website cleaning: strip `www.`, remove tracking params (utm_*, ref), remove menu/booking paths
-   - Coordinates: from URL `@(-?\d+\.\d+),(-?\d+\.\d+)` pattern
-7. Retry logic: up to `retries` attempts, with error logging
-8. Returns null on all failures
+#### Phase 2 — Auto Enrichment (`enrichPlaceDetail` → `scrapeDetailPage`)
 
-#### `enrichPlaceDetail(browser, placeUrl)` — PHASE 2: On-Demand
-- Calls `scrapeDetailPage(browser, placeUrl, 2, 45000)` — 2 retries, 45s timeout
-- Extracts website, rootDomain (via `extractRootDomain`), city (via `extractCityFromAddress`)
-- Calls `extractEmails(browser, website)` if website found
-- Returns `Partial<PlaceResult>`
+1. Opens new page, applies stealth patches (webdriver, chrome.runtime, plugins, languages)
+2. Navigate: `waitUntil: "domcontentloaded"`, 45s timeout
+3. Handle consent, wait for h1 (8s timeout), 1s wait
+4. Extract via `page.evaluate`:
+   - **Name**: `h1.DUwDvf` or `h1`
+   - **Category**: `button[jsaction*="pancat"]` → badge → parent siblings → `.Io6YTe`
+   - **Rating/Reviews**: aria-label regex, `.MW4etd`, `.UY7F9d`
+   - **Address**: `.Io6YTe`, aria-label patterns, data-tooltip
+   - **Phone**: `a[href^="tel:"]`, `.Io6YTe`, data-tooltip, aria-label
+   - **Website**: `a[href]` with website label, excluding third-party (opentable, yelp, tripadvisor, booking.com, etc.)
+   - **Website cleaning**: strip www, remove utm_*/ref params, remove menu/booking paths
+   - **Coordinates**: from URL `@(-?\d+\.\d+),(-?\d+\.\d+)`
+5. **2 retries** with error logging, 45s timeout
+6. Returns null on all failures
 
-#### `extractEmails(browser, websiteUrl)` — Homepage Only
-1. Opens new page with `setupPage(page, false)` — CSS NOT blocked
-2. Navigation: `waitUntil: "networkidle2"`, timeout: 15000ms
-3. Post-nav wait: 2000ms
-4. `page.evaluate`: regex on `body.innerText` + collect `a[href^="mailto:"]` links
-5. Deobfuscate: `[at]`→`@`, `(at)`→`@`, `[dot]`→`.`, `(dot)`→`.`
-6. Fallback: if evaluate returns nothing, scan `page.content()` raw HTML with same regex
-7. Filter out: noreply, webmaster, no-reply, mailer-daemon, postmaster, abuse, admin
-8. Retry homepage once if empty (no contact pages visited)
-9. Sort: by domain match → priority prefix (info, hello, contact, book, reserv, appoint, inquir, support, sales, admin, office) → alphabetical
-10. Return top 3 emails, comma-separated
+### 5.5 Email Extraction (`extractEmails`) — **fetch + regex, no browser**
 
-#### `extractRootDomain(urlStr)` — TLD-aware root domain extraction
-Custom multi-part TLD detection (co.uk, com.au, org.uk, etc.)
+1. `fetch(url, { signal: AbortController, timeout: 10s })` with custom User-Agent
+2. Regex `EMAIL_REGEX` on full HTML response text
+3. Extract `mailto:` links from HTML
+4. Deobfuscate: `[at]→@`, `(at)→@`, `[dot]→.`, `(dot)→.`
+5. **Junk filtering**:
+   - SKIP_LOCALS: noreply, webmaster, admin, bootstrap, filler, placeholder, email, etc.
+   - SKIP_DOMAINS: sentry.io, wixpress.com, godaddy.com, wix.com, squarespace.com, etc.
+   - Version-like domains: reject `/^\d+(\.\d+)+$/` (e.g., `bootstrap@5.1.0`)
+   - No valid TLD: reject domains without `.[a-zA-Z]{2,}` suffix
+6. One retry if nothing found (500ms gap)
+7. Sort by: domain match priority → business prefix (info, contact, sales, etc.) → alphabetical
+8. Return top 3 emails, comma-separated
 
-#### `extractCityFromAddress(address)`
-1. Split by comma, trim, filter empty
-2. Remove trailing country from known set (usa, uk, australia, saudi arabia, canada)
-3. Take `parts[last-1]` as candidate
-4. Strip state abbreviation + ZIP pattern: `^(.+?)\s+(?:[A-Z]{2}\s+\d{5}|[A-Z]{1,2}\d)`
-5. Return cleaned city name
+### 5.6 Post-Enrichment Pipeline
 
-#### ~~matchesLocation~~ — Removed
-Location filtering is handled by Google's search query. Card addresses don't contain city names, so the function was dropping 95% of valid results. Replaced by `placeUrl` deduplication.
+After all results enriched, applied sequentially:
+1. **City filter** — keep only results matching selected town (if enabled)
+2. **Root domain dedup** — keep first result per `rootDomain`
+3. **Website filter** — remove results without a website
+4. **Cap** — trim to `maxResults`
 
-### 5.5 Server$ Functions
+### 5.7 Server$ Functions
 
-#### `startScrape(query, maxResults=500, countryCode="us", locationFilter="", filteredCategory="")` → sessionId
-- Creates session
-- Gets browser via `getBrowser()`
-- Calls `scrapeQueryResults()` once
-- **Phase 2 auto-enrichment**: visits each result's detail page sequentially (1 at a time, 500ms gap). Skips results with phone+website already present. Progress: `"Enriching 47/243 — 45 done"`.
-- Browser NOT closed after completion (survives for enrichment)
-- Deduplication: `seen` Set, key = `placeUrl || name.toLowerCase()`
+| Function | Signature | Notes |
+|----------|-----------|-------|
+| `startScrape` | `(query, maxResults, countryCode, filteredCategory, locationFilter, filterByLocation)` → sessionId | Single search + auto-enrich |
+| `startBatchScrape` | `(keywords[], towns[], stateName, maxResults, countryCode, countrySuffix, filteredCategory, filterByLocation)` → sessionId | 3 towns concurrent, round-robin browsers |
+| `pollScrape` | `(sessionId, since=0)` → ScrapeResult | `since>0` enables lightweight polling (empty places when unchanged) |
+| `destroyScrape` | `(sessionId)` → void | Cancels running session |
+| `fetchPlaceDetail` | `(sessionId, placeUrl)` → PlaceResult | On-demand detail extraction |
+| `extractEmailForWebsite` | `(websiteUrl)` → string | Simple fetch+regex, no browser |
+| `extractPlaceFromUrl` | `(placeUrl)` → PlaceResult | Single URL extraction (for /details route) |
 
-#### `startBatchScrape(keywords[], towns[], stateName, maxResults, countryCode, countrySuffix, filteredCategory)` → sessionId
-- Creates session
-- `ensureBrowsers(3)` — creates 3 browsers
-- CONCURRENCY = 3 towns per batch
-- For each town × keyword: calls `scrapeQueryResults()` with round-robin browser
-- Deduplication: `seen` Set, key = `placeUrl || name.toLowerCase()`
-- **Phase 2 auto-enrichment**: all results enriched sequentially (1 at a time, round-robin browsers, 500ms gap). Skips already-enriched results.
-- `closeAllBrowsers()` in finally block
-- Per-keyword logging: `console.log("[batch] \"{kw}\" in \"{town}\" → {n} raw")`
+### 5.8 Constants
 
-#### `pollScrape(sessionId)` → ScrapeResult | null
-Returns session snapshot: `{ places: [...], query, totalResults, error, status, progress }`
-
-#### `destroyScrape(sessionId)`
-Deletes session from Map
-
-#### `fetchPlaceDetail(sessionId, placeUrl)` → PlaceResult | null
-- Finds session, finds place by placeUrl
-- `ensureBrowsers(1)` — ensures browser exists
-- Calls `enrichPlaceDetail(browser, placeUrl)`
-- Merges enriched data into `session.places[idx]`
-- Error logging for session-not-found, place-not-found, enrichment failures
-
-#### `extractEmailForWebsite(websiteUrl)` → string
-- `ensureBrowsers(1)` + `extractEmails(browser, websiteUrl)`
-
-#### `exportToCSV(places[])` → string
-14 columns: Name, Address, City, Rating, Review Count, Category, Filtered Category, Keyword, Phone, Email, Website, Root Domain, Latitude, Longitude, Place URL. CSV escape with double-quotes for commas/quotes/newlines.
-
-### 5.6 Constants
 ```ts
 BROWSERS_COUNT = 3
+MAX_CONCURRENT_SESSIONS = 5
 CONCURRENCY (batch towns per loop) = 3
-perSearchLimit = Math.min(30, Math.max(maxResults, 20))
-SESSION_TTL = 30 minutes (time-based cleanup interval runs every 60s)
+perSearchLimit = Math.min(120, Math.max(maxResults, 20))
+SESSION_TTL = 30 minutes (cleanup every 60s)
+ORPHANED_SESSION_MAX_AGE = 60 minutes
 RATE_DELAY = {
-  betweenKeywords: 1000,  // 1s between keyword searches in same town
+  betweenKeywords: 1000,  // 1s between keyword searches
   betweenTowns: 2000,     // 2s between town batches
   detailPage: 500,        // 500ms before detail page enrichment
-  emailPage: 500,         // 500ms before email extraction page load
 }
 ```
-
----
 
 ## 6. Location & Category Data
 
 ### 6.1 Locations (`src/data/locations.ts`)
 
-Interface:
-```ts
-interface RegionLocation { name: string; abbr: string; priority: number; towns: string[]; }
-interface CountryLocation { name: string; code: string; suffix: string; regions: RegionLocation[]; }
-```
+4 countries with regions and towns:
+- **United States**: 40 states, each with priority flag and town list
+- **United Kingdom**: 33 regions
+- **Australia**: 8 states
+- **Saudi Arabia**: 12 provinces
 
-Countries:
-- **US** (`code: "us"`): 40 states, each with 5-100+ towns
-- **UK** (`code: "uk"`, `suffix: "UK"`): 33 regions (London, Greater Manchester, Scotland, Wales, Northern Ireland, etc.)
-- **Australia** (`code: "au"`, `suffix: "Australia"`): 8 states/territories
-- **Saudi Arabia** (`code: "sa"`, `suffix: "Saudi Arabia"`): 12 provinces
-
-Functions:
-- `getAllRegions(countryCode)` → priority regions first (sorted by priority), then alphabetical
-- `getCountry(countryCode)` → full country object or undefined
+Region interface: `{ name, abbr, priority, towns[] }`
 
 ### 6.2 Categories (`src/data/categories.ts`)
 
-Interface:
-```ts
-interface CategoryKeywords { label: string; keywords: string[]; }
-```
-
-25 categories with 2-9 keywords each. Example entry:
-```ts
-{ label: "Restaurants & Cafes", keywords: ["restaurant", "cafe", "coffee shop", "dining", "fast food"] }
-```
+25 business categories, each with 3-8 keyword variations:
+- Restaurants & Cafes, Salons & Barbershops, Pharmacies, Supermarkets, Clinics, Car Services, Gyms, Laundry, Real Estate, Banks, Opticals, Flower Shops, Tailoring, Home Services, Furniture, Event Halls, Travel Agencies, IT Services, Education, Pet Shops, Tattoo Studios, Book Shops, Art Supply, Gift Stores, Museums
 
 ## 7. UI Components
 
-### 7.1 SearchBar (`src/components/search-bar/search-bar.tsx`)
+### 7.1 SearchBar
+- Country → Region (priority-sorted) → Town dropdowns
+- "All towns" option triggers batch mode
+- Multi-category popover with checkboxes, chip display for selected
+- Max results input, city filter toggle
+- Keywords auto-populated from selected categories
 
-**Layout:**
-```
-🔍 [keywords input] [US ▼] [Category] [Region ▼] [Town ▼] Max:[999] [Scrape]
-Tip: Select a country, pick a category & region, then scrape.
-```
+### 7.2 ResultsTable
+- 15 columns with copy-to-clipboard on every cell
+- Pagination: 50 per page, smart ellipsis for >7 pages
+- Inline "Fetch Details" and "Fetch Email" buttons
+- Email column shows `mailto:` links when found
 
-**Signals:**
-- `query`, `maxResults: 999`, `selectedCountry: "us"`, `selectedRegion: ""`, `selectedTown: ""`
-- `selectedCategories: string[]` — multi-category array
-- `popoverOpen: boolean` — category popover toggle
-- `regionOptions` — initialized with `getAllRegions("us")` (NOT empty, to show on load)
-- `townOptions`
+### 7.3 PlaceCard
+- Card layout with rating stars, category badge, keyword label
+- Copy buttons on every field
+- Fetch Details / Fetch Email buttons where applicable
+- Coordinates display
 
-**Category Chips UI:**
-- 0 selected: `[+ Category]` trigger button
-- 1 selected: `[Restaurants ✕]` with individual remove
-- 2+ selected: `[Restaurants +2]` showing first + count, click opens popover, ✕ clears all
-- Popover: absolute-positioned panel with backdrop, checkboxes for all 25 categories, scrollable max 280px
-
-**Keyword Sync:**
-`useTask$` tracks `selectedCategories` and auto-populates query input with all keywords joined by " / "
-
-**Search Modes (handleSubmit):**
-1. **All towns batch**: `{category} across {n} towns in {region}` — all keywords × all towns
-2. **Single town + keywords**: `{category} in {town}, {region}` — batch with 1 town
-3. **Free text**: passes query directly
-
-**SearchParams passed to parent:**
-```ts
-interface SearchParams {
-  query, maxResults, isBatch?, allKeywords?, towns?, stateName?,
-  countryCode?, countrySuffix?, locationFilter?, filteredCategory?,
-  regionName?, regionAbbr?
-}
-```
-
-### 7.2 ResultsTable (`src/components/results-table/results-table.tsx`)
-
-**Columns (15):**
-`# | Name | [Details] | Category | Keyword | City | Filtered Category | Rating | Reviews | Address | Phone | Email | Website | Root Domain | Source`
-
-**Features:**
-- Pagination: 50 rows/page, prev/next + page numbers with ellipsis
-- Copy buttons on: Name, Category, Keyword, City, Filtered Category, Address, Phone, Email, Website
-- Bootstrap copy SVG icon, green flash on copy (1200ms)
-- Fetch Details button: appears when `placeUrl && (!phone || !website)`. Uses `data-fetch-detail` attribute
-- Fetch Email button: appears when website exists but no email. Uses `data-fetch-email` attribute
-- Loading spinners for both fetch operations
-- Email: mailto link when available
-- Website: trimmed to 30 chars
-
-### 7.3 PlaceCard (`src/components/place-card/place-card.tsx`)
-
-**Fields displayed:**
-- Name (h3 + copy button)
-- Rating (stars + numeric + review count)
-- Fetch Details button (data-fetch-detail, when phone/website missing)
-- Category badge (accent color)
-- City (map pin icon)
-- Filtered Category (tag icon)
-- Keyword badge (green)
-- Address (location icon)
-- Phone (phone icon)
-- Email section: mailto link + copy / Fetch Email button / spinner
-- Website (link icon, clickable)
-- Coordinates (lat/lng display)
-- View on Maps link
-
-### 7.4 Main Page (`src/routes/index.tsx`)
-
-**Signals:**
-- `results: ScrapeResult | null`
-- `isLoading`, `viewMode: "cards" | "table"`, `progressMsg`
-- `sessionIdRef: string` — preserved for enrichment
-- `extractedEmails: Record<string,string>` — email cache
-- `loadingEmails: Record<string,boolean>` — per-URL loading state
-- `lastCategory`, `lastTown`, `lastRegionName`, `lastRegionAbbr` — CSV filename parts
-- `fetchDetailLoading: Record<string,boolean>` — per-URL detail loading state
-
-**Handlers:**
-- `pollForResults(sid)` — 2s interval, stops on done/error (session NOT destroyed)
-- `handleSearch(params)` → `startScrape()` or `startBatchScrape()`
-- `handleExportCSV()` → merges emails, filename: `{date} - {cat} - {town} - {region} [abbr].csv`
-- `handleClearResults()` → resets all state + emails
-- `handleCancel()` → `destroyScrape(sid)` + stops loading
-
-**CRITICAL: Global Click Delegates (useOnDocument):**
-```ts
-useOnDocument('click', $(async (event) => {
-  // [data-fetch-detail] → calls fetchPlaceDetail() inline
-  // [data-fetch-email]  → calls extractEmailForWebsite() inline
-  // Both with try/catch/finally for loading state management
-}));
-```
-Buttons use `data-fetch-detail={placeUrl}` and `data-fetch-email={websiteUrl}` attributes.
-QRL `onClick$` was abandoned because QRL-calling-QRL fails silently.
-
-**Layout Sections:**
-- Welcome state (icon + description + feature chips)
-- Loading state (spinner)
-- Error banner (red)
-- Progress banner (purple, spinner + message + cancel button)
-- Results section (header with count/query + view toggle + export + clear + results)
-- Footer
-
----
+### 7.4 Main Page (`index.tsx`)
+- State: `results`, `isLoading`, `viewMode`, `progressMsg`, `sessionIdRef`, `extractedEmails`, `loadingEmails`, `fetchDetailLoading`
+- 2-second polling loop with lightweight snapshot optimization
+- Event delegation for Fetch Details / Fetch Email clicks
+- CSV export with formatted filename: `{date} - {category} - {town} - {region}.csv`
 
 ## 8. CSV Export
 
-**Filename:** `{YYYY-MM-DD} - {Category} - {Town} - {Region} [{Abbr}].csv`
-Example: `2025-05-25 - Restaurants & Cafes - Albany - New York [NY].csv`
+15 columns: Name, Address, City, Rating, Review Count, Category, Filtered Category, Keyword, Phone, Email, Website, Root Domain, Latitude, Longitude, Place URL
 
-**Columns (14):** Name, Address, City, Rating, Review Count, Category, Filtered Category, Keyword, Phone, Email, Website, Root Domain, Latitude, Longitude, Place URL
+Proper CSV escaping: double-quote fields containing commas, quotes, or newlines; double internal quotes.
 
-Email column merges `extractedEmails[website]` if scraped email is empty.
+## 9. Deployment
 
----
-
-## 9. Styling System
-
-**Dark theme CSS variables:**
-```css
---bg-primary: #0f0f23; --bg-secondary: #1a1a3e; --bg-card: #1e1e42; --bg-input: #161638;
---text-primary: #e8e8f0; --text-secondary: #a0a0c0; --text-muted: #6a6a8e;
---accent: #6c63ff; --accent-hover: #7d75ff; --success: #4caf50; --error: #ff5252;
---border: rgba(108, 99, 255, 0.2); --radius: 12px; --radius-sm: 8px;
-```
-
-**Key classes:**
-- `.search-input-wrapper` — flex row, dark bg, `overflow: visible`
-- `.location-select-group` — flex row, `gap: 0`
-- `.category-chips-row` — flex wrap, relative position (for popover)
-- `.category-chip` — accent-bordered tag
-- `.category-popover` — absolute dropdown, `z-index: 100`, `max-height: 280px`, scrollable
-- `.popover-backdrop` — fixed fullscreen, `z-index: 99`
-- `.results-table` — full-width dark table
-- `.copy-btn` — inline 24x24 transparent icon, 35% opacity, accent hover, green `.copied`
-- `.fetch-email-btn` — accent-border button
-- `.email-spinner` — 14px border spinner
-- `.cancel-btn` — red-border button, right-aligned
-- `.fetch-email-btn` — shared button class for both Fetch Details and Fetch Email
-
----
-
-## 10. Deployment
-
-### Dockerfile
+### Docker
 ```dockerfile
 FROM node:22-slim
-# Install Chromium + fonts (Arabic, CJK, Noto)
-ENV PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-COPY package*.json ./ → npm install → COPY . → npm run build && npm run build.server → npm prune --omit=dev
-EXPOSE 8080
-CMD ["node", "server/server.js"]
+RUN apt-get install chromium + international fonts
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ```
 
-### Server (`server.ts`)
-```ts
-import { createQwikCity } from "@builder.io/qwik-city/middleware/node";
-createServer(createQwikCity({ render, qwikCityPlan })).listen(PORT);
+### Environment Variables
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `PUPPETEER_SKIP_DOWNLOAD` | Skip Chromium download | `true` |
+| `PUPPETEER_EXECUTABLE_PATH` | System Chromium path | `/usr/bin/chromium` |
+| `PORT` | Server port | `8080` |
+| `HOST` | Server host | `0.0.0.0` |
+| `GOOGLE_API_KEY` | Places API key (optional) | — |
+
+### Production
+```bash
+npm run build && npm run build.server && npm start
 ```
 
-### Railway Config
-```toml
-[build] builder = "DOCKERFILE"
-[deploy] healthcheckPath = "/", healthcheckTimeout = 300, restartPolicyType = "ON_FAILURE"
+### Development
+```bash
+# Windows
+set PUPPETEER_SKIP_DOWNLOAD=true && set PUPPETEER_EXECUTABLE_PATH=C:\...\chrome.exe && npm run dev
+
+# Linux/macOS
+npm run dev
 ```
 
----
+## 10. Key Design Decisions
 
-## 11. Qwik QRL Serialization — THE CRITICAL ISSUE
+### Why fetch+regex for emails (not Puppeteer)
+- 3-5x faster (1-2s vs 3-5s per site)
+- No browser resource consumption
+- Same accuracy for homepage email extraction
+- AbortController provides timeout safety
 
-**Qwik's `$()` functions (QRLs) cannot call other `$()` functions.** This is by design — QRLs are lazily loaded and serialized independently.
+### Why in-memory sessions (not a job queue)
+- Simplicity — no Redis/DB dependency
+- Session TTL + orphan cleanup handles leaks
+- Suitable for single-instance Railway/Render deployment
+- Sessions survive as long as the Node process
 
-### What Works
-```tsx
-onClick$={() => signal.value = newValue}          // Direct signal mutation
-$(() => { regularFunction(signal.value) })         // $() calling regular function
-useOnDocument('click', $(() => { ... }))            // Global event delegate
-```
+### Why snapshot-based polling
+- `_lastSnapshot = "${places.length}:${progress}"` 
+- When unchanged between polls, return lightweight response (empty places)
+- Client preserves existing results, only updates status/progress
+- Reduces JSON serialization overhead by ~90% during enrichment
 
-### What Silently Fails (No Error)
-```tsx
-useTask$(() => { another$fn() })                   // "function not defined" at runtime
-onClick$={() => another$fn(value)}                 // Button does nothing
-useOnDocument('click', $(() => { $fn(url) }))      // Handler silently dropped
-```
+## 11. Known Issues
 
-### The Fix Used Here
-- All buttons use `data-*` attributes (`data-fetch-detail`, `data-fetch-email`)
-- A single `useOnDocument('click', $(async (event) => {...}))` handler catches all clicks
-- The handler logic is INLINED directly (no calling other `$()` functions)
-- This bypasses the entire QRL-calling-QRL problem
-
----
-
-## 12. Known Issues & Lessons for Recreation
-
-### Critical Design Flaws
-1. **QRL serialization breaks button handlers** — Any framework that doesn't have QRL-like serialization boundaries (React, Vue, Svelte, vanilla JS) would avoid this entire class of bugs.
-2. **`/analytics/i` block pattern** — Too broad. Matches legitimate business URLs. Use specific host blocking only.
-3. **In-memory sessions** — Lost on server restart. No persistence.
-
-### Resolved Issues (Solutions to Preserve)
-1. **Region dropdown empty on load** → Initialize signal with default data, not empty array
-2. **Email extraction failing** → Use `networkidle2`, longer timeout, CSS enabled, raw HTML fallback
-3. **Dedup by name drops chain locations** → Dedup on `placeUrl` (unique per physical location)
-4. **Session destroyed before enrichment** → Don't destroy session on scrape completion, let TTL handle cleanup
-5. **Card data extraction messy** → Split text on `·` separator, filter by pattern
-6. **Address status appended** → CamelCase split + status word stripping
-7. **Browser unresponsive** → Health check via `browser.version()`, auto-replace dead browsers
-8. **Double URL prefix on placeUrl** → Card `href` may be absolute (`https://www.google.com/maps/place/...`). Unconditionally prepending `https://www.google.com` creates `https://www.google.comhttps://www.google.com/...`. Fix: check `href.startsWith("http")` before prepending. This was silently breaking Fetch Details (ERR_NAME_NOT_RESOLVED on detail page enrichment).
-9. **Fetch Details/Email QRL deadlock** → QRL-calling-QRL fails silently. Fix: `useOnDocument` + `data-*` attributes with inlined logic. Abandon per-element `onClick$`.
-10. **Scroll used artificial iteration caps** → Fixed iteration budgets caused either too-short scrolls (miss results) or too-deep (DOM recycles). Fix: `exhaustivelyScroll()` uses `while(true)` checking `body.innerText` for `"You've reached the end of the list"`. Stale-card-count fallback at 10 rounds. No max iterations, no math formula. Google tells us when it's done. Scroll delay increased from 600ms to 1500ms for human-like pacing.
-11. **Rate limiting** → Concurrent keyword searches without delays trigger bot detection. Fix: sequential keywords per town with 1s gap, 2s between town batches, 500ms before detail enrichment, 500ms before email extraction. Configurable via `RATE_DELAY` constants.
-12. **Images blocked at browser level** → `--blink-settings=imagesEnabled=false` blocked images on ALL pages including Google Maps search. Made the search page look bot-like during scrolling. Fix: removed browser-level flag entirely. `setupPage` request interception only blocks non-Google images (`!url.includes("google") && !url.includes("gstatic")`), so map tiles, thumbnails, and business photos load normally. Email extraction uses `setupPage(page, false)` — no image blocking at all.
-13. **Phase 1 location filter dropped 95% of results** → Google Maps search cards don't contain city names in address snippets. `matchesLocation(place.address, "Albany")` fails for cards showing "652 Albany Shaker Rd" without "Albany, NY" in the snippet. Fix: removed `matchesLocation` function entirely. Removed `locationFilter` parameter from `startScrape`. The Google search query `"restaurant in Albany, New York"` already geo-filters results.
-14. **Scroll delay was too fast** → 600ms between scrolls looked bot-like with multiple concurrent searches. Fix: increased to 1500ms. Combined with end-of-list detection, Google images loading, and rate-limited keyword sequencing, the crawl is now much harder to detect.
-15. **Phase 2 detail enrichment was manual** → User had to click Fetch Details on every result. Fix: auto-enrichment loop runs after Phase 1 completes. All results are processed sequentially (1 at a time, 500ms gap). Progress shown as `"Enriching 47/243 — 45 done"`. Skips results that already have phone AND website. Cancel-safe (checks `session.status`).
-
-### Recommended Architecture for Recreation
-1. **Don't use Qwik** — Use React, Vue, Svelte, or any framework without serialization boundaries
-2. **Server-sent events (SSE)** for real-time progress instead of polling
-3. **Separate browser context per operation** — Don't share browser pools
-4. **Persist session data** — Use file-based or database storage
-5. **Request-level resource blocking** — Not browser-level flags
+- **Google rate limiting**: Extended scraping may trigger CAPTCHAs. Use conservative delays.
+- **In-memory state**: Server restart loses in-progress sessions.
+- **CSS monolithic**: All styles in single file — no scoping. Migrate to CSS modules for scale.
+- **`server.ts` not in tsconfig**: Compiled by Vite SSR build, not tsc. Keep it out of `include`.
+- **Duplicate domains during enrichment**: Expected — cleaned by `dedupByRootDomain()` post-enrichment.
