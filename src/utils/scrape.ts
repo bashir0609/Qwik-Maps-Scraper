@@ -875,6 +875,10 @@ async function extractEmails(websiteUrl: string): Promise<string> {
     "foo",
     "bar",
     "someone",
+    "bootstrap",
+    "filler",
+    "placeholder",
+    "email",
   ]);
   const SKIP_DOMAINS = new Set([
     "sentry.io",
@@ -886,6 +890,11 @@ async function extractEmails(websiteUrl: string): Promise<string> {
     "test.com",
     "mailchimp.com",
     "klaviyo.com",
+    "godaddy.com",
+    "secureserver.net",
+    "wix.com",
+    "weebly.com",
+    "squarespace.com",
   ]);
 
   const deobfuscate = (s: string): string => {
@@ -904,6 +913,10 @@ async function extractEmails(websiteUrl: string): Promise<string> {
     if (SKIP_LOCALS.has(local)) return true;
     if (SKIP_DOMAINS.has(domain)) return true;
     if ([...SKIP_DOMAINS].some((d) => domain.endsWith("." + d))) return true;
+    // Reject version-like domains (e.g., bootstrap@5.1.0)
+    if (/^\d+(\.\d+)+$/.test(domain)) return true;
+    // Reject domains without a valid TLD (must end with at least 2 letters)
+    if (!/\.[a-zA-Z]{2,}$/.test(domain)) return true;
     return false;
   };
 
