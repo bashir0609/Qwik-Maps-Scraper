@@ -719,9 +719,15 @@ async function scrapeDetailPage(
       });
 
       if (!result.name && attempt < retries) {
+        console.warn(
+          `[scrapeDetailPage] No name found for ${href.substring(0, 60)}, retrying...`,
+        );
         if (!page.isClosed()) await page.close().catch(() => {});
         continue;
       }
+      console.log(
+        `[scrapeDetailPage] OK: ${result.name?.substring(0, 40)} | phone=${result.phone || "none"} | web=${result.website?.substring(0, 30) || "none"}`,
+      );
       return result;
     } catch (err) {
       if (attempt < retries) {
@@ -1398,6 +1404,9 @@ export const startScrape = server$(async function (
       const toEnrich = session.places.filter(
         (p) => p.placeUrl && (!p.phone || !p.website),
       );
+      console.log(
+        `[startScrape] Phase 2: enriching ${toEnrich.length}/${session.places.length} results`,
+      );
       session.progress = `Enriching details for ${toEnrich.length} results...`;
       let enrichedCount = 0;
       let skippedCount = 0;
@@ -1420,9 +1429,18 @@ export const startScrape = server$(async function (
           skippedCount++;
           continue;
         }
+        console.log(
+          `[startScrape] Enriching ${i + 1}/${session.places.length}: ${place.name?.substring(0, 40)}`,
+        );
         try {
           const result = await enrichPlaceDetail(browser, place.placeUrl);
-          if (Object.keys(result).length > 0) {
+          const keys = Object.keys(result).filter(
+            (k) => result[k as keyof typeof result],
+          );
+          console.log(
+            `[startScrape] Enriched ${place.name?.substring(0, 30)}: ${keys.join(", ") || "no fields"}`,
+          );
+          if (keys.length > 0) {
             session.places[i] = { ...place, ...result };
             enrichedCount++;
           } else {
@@ -1617,6 +1635,9 @@ export const startBatchScrape = server$(async function (
       const toEnrich = session.places.filter(
         (p) => p.placeUrl && (!p.phone || !p.website),
       );
+      console.log(
+        `[startBatchScrape] Phase 2: enriching ${toEnrich.length}/${session.places.length} results`,
+      );
       session.progress = `Enriching details for ${toEnrich.length} results...`;
       let enrichedCount = 0;
       let skippedCount = 0;
@@ -1640,9 +1661,18 @@ export const startBatchScrape = server$(async function (
           continue;
         }
         const br = browsers[i % browsers.length] || browsers[0];
+        console.log(
+          `[startBatchScrape] Enriching ${i + 1}/${session.places.length}: ${place.name?.substring(0, 40)}`,
+        );
         try {
           const result = await enrichPlaceDetail(br, place.placeUrl);
-          if (Object.keys(result).length > 0) {
+          const keys = Object.keys(result).filter(
+            (k) => result[k as keyof typeof result],
+          );
+          console.log(
+            `[startBatchScrape] Enriched ${place.name?.substring(0, 30)}: ${keys.join(", ") || "no fields"}`,
+          );
+          if (keys.length > 0) {
             session.places[i] = { ...place, ...result };
             enrichedCount++;
           } else {
